@@ -1,0 +1,43 @@
+name: Stock News Telegram Bot
+
+on:
+  schedule:
+    # Uruchamiaj automatycznie co 30 minut
+    - cron: '0 */2 * * *'
+  workflow_dispatch: # Pozwala odpalić bota ręcznie przyciskiem w zakładce Actions
+
+jobs:
+  check-news:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Ściągamy Twój kod z repozytorium na wirtualną maszynę GitHuba
+      - name: Pobierz kod repozytorium
+        uses: actions/checkout@v4
+
+      # 2. Instalujemy Pythona w wersji 3.12
+      - name: Zainstaluj Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      # 3. Instalujemy biblioteki z pliku requirements.txt
+      - name: Zainstaluj biblioteki
+        run: pip install -r requirements.txt
+
+      # 4. Odpalamy skrypt i przekazujemy mu ukryte klucze z zakładki Secrets
+      - name: Uruchom bota
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python bot.py
+
+      # 5. Jeśli state.json się zmienił (np. doszły nowe linki lub spółka z komendy), zapisujemy go z powrotem
+      - name: Zapisz zaktualizowany stan bota
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add state.json
+          git diff --staged --quiet || git commit -m "chore: update state.json"
+          git push
