@@ -1,5 +1,16 @@
 {
-  "last_update_id": 0,
-  "companies": ["CDPROJEKT", "PKNORLEN", "PEKAO"],
-  "seen_links": []
+  "last_update_id": 281805238,
+  "companies": [
+    "CDPROJEKT",
+    "PKNORLEN",
+    "PEKAO"
+  ],
+  "seen_links": [
+    "https://www.bankier.pl/wiadomosc/Paramount-Pictures-pracuje-nad-filmem-w-uniwersum-Cyberpunka-opis-9209947.html",
+    "https://www.bankier.pl/wiadomosc/W-Wiedzmin-3-Remaster-na-platformie-Steam-gra-jednoczesnie-ok-120-tys-osob-CD-Projekt-RED-9204703.html",
+    "https://www.bankier.pl/wiadomosc/Podatek-wymierzony-prosto-w-Orlen-Czechy-chca-miliona-euro-z-polskich-rafinerii-9212187.html",
+    "https://www.bankier.pl/wiadomosc/Projekt-farmy-wiatrowej-Baltic-East-w-ciagu-2-3-lat-dojdzie-do-etapu-FID-Orlen-Neptun-9211374.html",
+    "https://www.bankier.pl/wiadomosc/Maksymilian-Skolik-zostal-dyrektorem-Biura-Maklerskiego-Pekao-9211688.html",
+    "https://www.bankier.pl/wiadomosc/Dwa-wielkoskalowe-magazyny-energii-w-Polsce-otrzymaly-lacznie-ok-500-mln-zl-finansowania-od-konsorcjum-bankow-9209398.html"
+  ]
 }
