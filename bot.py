@@ -4,6 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 import trafilatura
 from google import genai
+import time
 
 # --- 1. KONFIGURACJA I ZMIENNE ŚRODOWISKOWE ---
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -145,11 +146,24 @@ def summarize_article(company, title, text):
     Tytuł: {title}
     Treść: {text[:6000]}
     """
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt,
-    )
-    return response.text
+    
+    # Lista modeli do wypróbowania po kolei (gdyby pierwszy był przeciążony)
+    models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+    
+    for model_name in models_to_try:
+        for attempt in range(3):  # 3 próby dla każdego modelu
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                return response.text
+            except Exception as e:
+                print(f"Próba {attempt + 1} dla {model_name} nieudana: {e}")
+                time.sleep(5)  # Czekamy 5 sekund przed kolejną próbą
+                
+    # Jeśli po wszystkich próbach serwery Google nadal leżą, zwracamy komunikat awaryjny zamiast wywalać bota!
+    return "⚠️ _Serwery AI są chwilowo przeciążone – kliknij w link poniżej, aby przeczytać pełny artykuł._"
 
 
 def main():
