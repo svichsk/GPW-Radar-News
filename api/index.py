@@ -20,7 +20,10 @@ def send_message(chat_id: int, text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
+# TUTAJ DODALIŚMY DODATKOWE ŚCIEŻKI (KROK 2):
 @app.post("/api/webhook")
+@app.post("/api/index")
+@app.post("/")
 async def telegram_webhook(request: Request):
     """Główny endpoint - tutaj Telegram uderza z nową wiadomością"""
     try:
@@ -63,8 +66,4 @@ async def telegram_webhook(request: Request):
         # Pobieramy listę (SELECT symbol FROM companies)
         response = supabase.table("companies").select("symbol").execute()
         companies_list = [row["symbol"] for row in response.data]
-        spolki_tekst = ", ".join(companies_list) if companies_list else "Brak obserwowanych spółek."
-        send_message(chat_id, f"📋 *Obserwowane spółki (z bazy):*\n{spolki_tekst}")
-
-    # Telegram wymaga, żeby serwer odpowiedział statusem 200 (OK) - inaczej będzie próbował wysłać tę samą wiadomość w nieskończoność
-    return {"status": "ok"}
+        sp
