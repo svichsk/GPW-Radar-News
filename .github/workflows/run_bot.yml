@@ -3,7 +3,7 @@ name: Stock News Telegram Bot
 on:
   schedule:
     # Uruchamiaj automatycznie co 30 minut
-    - cron: '0 */2 * * *'
+    - cron: '17 */2 * * *'
   workflow_dispatch: # Pozwala odpalić bota ręcznie przyciskiem w zakładce Actions
 
 jobs:
