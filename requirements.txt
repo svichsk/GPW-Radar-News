@@ -2,3 +2,5 @@ requests
 beautifulsoup4
 trafilatura
 google-genai
+fastapi
+supabase
