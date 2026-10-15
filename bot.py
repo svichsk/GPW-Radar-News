@@ -12,38 +12,35 @@ CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+# Opcjonalny klucz Groq (jeśli dodasz go w przyszłości do Secrets na GitHubie, zadziała jako turbodoładowany zapas)
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 }
 
 client = genai.Client(api_key=GEMINI_KEY)
-# Łączymy się z bazą danych
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-# --- 2. FUNKCJE BAZY DANYCH (Zamiast pliku state.json) ---
+# --- 2. FUNKCJE BAZY DANYCH ---
 def get_companies():
-    """Pobiera listę obserwowanych spółek z bazy"""
     response = supabase.table("companies").select("symbol").execute()
     return [row["symbol"] for row in response.data]
 
 def get_seen_links():
-    """Pobiera 200 ostatnich linków z bazy, żeby nie wysyłać ich ponownie"""
-    response = supabase.table("seen_links").select("url").order("id", desc=True).limit(200).execute()
+    response = supabase.table("seen_links").select("url").order("id", desc=True).limit(300).execute()
     return [row["url"] for row in response.data]
 
 def save_seen_link(url):
-    """Zapisuje nowy link do bazy"""
     try:
         supabase.table("seen_links").insert({"url": url}).execute()
     except Exception as e:
-        pass # Jeśli link już jest (dzięki regule UNIQUE w SQL), po prostu to ignorujemy
-
+        print(f"Info przy zapisie linku: {e}")
 
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": False})
+    requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": False}, timeout=10)
 
 
 # --- 3. POBIERANIE NEWSÓW I AI ---
@@ -51,7 +48,8 @@ def get_bankier_news_for_company(symbol, seen_links):
     profile_url = f"https://www.bankier.pl/inwestowanie/profile/quote.html?symbol={symbol}"
     try:
         response = requests.get(profile_url, headers=HEADERS, timeout=10)
-        if response.status_code != 200: return []
+        if response.status_code != 200:
+            return []
     except Exception:
         return []
 
@@ -68,7 +66,8 @@ def get_bankier_news_for_company(symbol, seen_links):
             if full_url not in seen_links:
                 new_articles.append({"title": title, "url": full_url})
                 seen_links.append(full_url)
-            if len(new_articles) >= 2: break
+            if len(new_articles) >= 2:
+                break
 
     return new_articles
 
@@ -77,26 +76,52 @@ def summarize_article(company, title, text):
     Jesteś analitykiem giełdowym. Przygotuj krótkie podsumowanie artykułu ze strony Bankier.pl dotyczącego spółki {company}.
     Format odpowiedzi:
     - Sentyment dla {company}: [Pozytywny 🟢 / Neutralny 🟡 / Negatywny 🔴]
-    - 2-3 krótkie podpunkty z najważniejszymi informacjami.
-    Tytuł: {title}\nTreść: {text[:6000]}
+    - 2-3 krótkie podpunkty z najważniejszymi informacjami (liczby, fakty, decyzje).
+    Tytuł: {title}
+    Treść: {text[:5000]}
     """
     
-    models = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+    # 1. Próbujemy modeli Google Gemini z rosnącym czasem oczekiwania (Exponential Backoff)
+    models = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
     for model_name in models:
         for attempt in range(2):
             try:
                 response = client.models.generate_content(model=model_name, contents=prompt)
-                return response.text
-            except Exception:
-                time.sleep(5)
+                if response and response.text:
+                    return response.text
+            except Exception as e:
+                print(f"Błąd modelu {model_name} (próba {attempt+1}): {e}")
+                # Jeśli to błąd 404 (model niedostępny dla konta), od razu przechodzimy do kolejnego modelu
+                if "404" in str(e):
+                    break
+                time.sleep(6 * (attempt + 1))
+
+    # 2. Opcjonalny zapas przez Groq API (Llama 3.3 70B), jeśli dodasz GROQ_API_KEY
+    if GROQ_API_KEY:
+        try:
+            r = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3
+                },
+                timeout=15
+            )
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"Błąd Groq: {e}")
+
     return "⚠️ _Serwery AI są chwilowo przeciążone – kliknij w link poniżej, aby przeczytać całość._"
 
 
 # --- 4. GŁÓWNA PĘTLA PROGRAMU ---
 def main():
-    # Zamiast czytać plik state.json, pobieramy dane na żywo z Supabase
     companies = get_companies()
     seen_links = get_seen_links()
+    sent_count = 0
     
     for company in companies:
         articles = get_bankier_news_for_company(company, seen_links)
@@ -109,9 +134,16 @@ def main():
             msg = f"🏢 *[{company}]* {article['title']}\n\n{summary}\n\n🔗 [Czytaj na Bankier.pl]({article['url']})"
             
             send_telegram_message(msg)
-            
-            # Gdy wyślemy wiadomość, od razu zapisujemy link w bazie SQL!
             save_seen_link(article["url"])
+            sent_count += 1
+            
+            # Krótka przerwa między artykułami, żeby nie przekroczyć darmowego limitu zapytań na minutę w AI!
+            time.sleep(4)
+
+    # Jeśli po sprawdzeniu wszystkich spółek nie było żadnego nowego artykułu, dajemy znać na czacie:
+    if sent_count == 0:
+        spolki_str = ", ".join(companies) if companies else "brak"
+        send_telegram_message(f"📭 *Raport kontrolny:* Sprawdzono Bankier.pl dla ({spolki_str}) – brak nowych artykułów.")
 
 if __name__ == "__main__":
     main()
