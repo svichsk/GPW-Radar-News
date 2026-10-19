@@ -15,11 +15,13 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 
+# Limit artykułów na jedno uruchomienie (chroni przed blokadą limitów darmowego API)
+MAX_ARTICLES_PER_RUN = 6
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 }
 
-# Słownik automatycznie zamieniający potoczne nazwy na oficjalne skróty z Bankier.pl
 SYMBOL_ALIASES = {
     "CYBERFOLKS": "CYBERFLKS",
     "CYBER_FOLKS": "CYBERFLKS",
@@ -35,7 +37,49 @@ client = genai.Client(api_key=GEMINI_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-# --- 2. FUNKCJE BAZY DANYCH I TELEGRAMA ---
+# --- 2. AUTOMATYCZNE WYKRYWANIE DOSTĘPNYCH MODELI GROQ ---
+def get_available_groq_models():
+    """Odpytuje API Groq o aktualną listę działających modeli tekstowych dla Twojego klucza."""
+    if not GROQ_API_KEY:
+        print("Brak klucza GROQ_API_KEY w środowisku.")
+        return []
+
+    try:
+        r = requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "User-Agent": HEADERS["User-Agent"]},
+            timeout=10
+        )
+        if r.status_code != 200:
+            print(f"Nie udało się pobrać listy modeli Groq ({r.status_code}): {r.text}")
+            return []
+
+        all_models = [m["id"] for m in r.json().get("data", [])]
+        print(f"Wszystkie modele na Twoim koncie Groq: {all_models}")
+
+        # Odrzucamy modele do audio (whisper, tts), moderacji (guard) i embeddingów
+        excluded_keywords = ["whisper", "tts", "guard", "embed", "playai", "orpheus", "vision", "safeguard"]
+        chat_models = [
+            m for m in all_models
+            if not any(bad in m.lower() for bad in excluded_keywords)
+        ]
+
+        # Sortujemy tak, aby modele z rodziny llama, qwen, deepseek lub gemma były na pierwszym miejscu
+        preferred = [m for m in chat_models if any(p in m.lower() for p in ["llama", "qwen", "deepseek", "gemma"])]
+        others = [m for m in chat_models if m not in preferred]
+        
+        final_list = preferred + others
+        print(f"Wybrane modele tekstowe Groq do użycia: {final_list[:4]}")
+        return final_list[:4]
+    except Exception as e:
+        print(f"Błąd podczas pobierania listy modeli Groq: {e}")
+        return []
+
+# Pobieramy listę aktywnych modeli Groq raz przy starcie bota
+ACTIVE_GROQ_MODELS = get_available_groq_models()
+
+
+# --- 3. FUNKCJE BAZY DANYCH I TELEGRAMA ---
 def get_companies():
     response = supabase.table("companies").select("symbol").execute()
     return [row["symbol"] for row in response.data]
@@ -51,9 +95,7 @@ def save_seen_link(url):
         print(f"Info przy zapisie linku: {e}")
 
 def send_telegram_message(text):
-    """Wysyła wiadomość w trybie HTML. Zwraca True, jeśli się udało."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    
     r = requests.post(
         url,
         json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": False},
@@ -62,8 +104,6 @@ def send_telegram_message(text):
     if r.status_code == 200:
         return True
 
-    print(f"Błąd formatowania HTML ({r.status_code}): {r.text}. Ponawiam jako zwykły tekst...")
-    
     r_fallback = requests.post(
         url,
         json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": False},
@@ -72,7 +112,7 @@ def send_telegram_message(text):
     return r_fallback.status_code == 200
 
 
-# --- 3. POBIERANIE NEWSÓW Z BANKIER.PL ---
+# --- 4. POBIERANIE NEWSÓW Z BANKIER.PL ---
 def get_bankier_news_for_company(raw_symbol, seen_links):
     symbol = SYMBOL_ALIASES.get(raw_symbol.upper(), raw_symbol.upper())
     profile_url = f"https://www.bankier.pl/inwestowanie/profile/quote.html?symbol={symbol}"
@@ -87,7 +127,6 @@ def get_bankier_news_for_company(raw_symbol, seen_links):
 
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # Usuwamy paski boczne, nawigację i stopkę, żeby nie łapać ogólnych newsów z portalu
     for tag in soup.find_all(["aside", "footer", "nav"]):
         tag.decompose()
 
@@ -109,7 +148,7 @@ def get_bankier_news_for_company(raw_symbol, seen_links):
     return new_articles, symbol
 
 
-# --- 4. POBIERANIE TREŚCI I DATY PUBLIKACJI ARTYKUŁU ---
+# --- 5. POBIERANIE TREŚCI I DATY PUBLIKACJI ARTYKUŁU ---
 def get_article_content_and_date(url, fallback_title):
     article_date = "Brak daty"
     article_text = fallback_title
@@ -142,24 +181,27 @@ def get_article_content_and_date(url, fallback_title):
     return article_text, article_date
 
 
-# --- 5. PODSUMOWANIE AI (ZWRACA TEKST ORAZ NAZWĘ MODELU) ---
+# --- 6. PODSUMOWANIE AI (DYNAMICZNY GROQ + AKTUALNE GEMINI 3.8) ---
 def summarize_article(company, title, text):
     prompt = f"""
     Jesteś analitykiem giełdowym. Przygotuj krótkie podsumowanie artykułu ze strony Bankier.pl dotyczącego spółki {company}.
-    Format odpowiedzi (nie używaj gwiazdek do pogrubiania, używaj myślników):
+    Odpowiedz wyłącznie po polsku. Format odpowiedzi (nie używaj gwiazdek do pogrubiania, używaj myślników):
     - Sentyment dla {company}: [Pozytywny 🟢 / Neutralny 🟡 / Negatywny 🔴]
     - 2-3 krótkie podpunkty z najważniejszymi informacjami (liczby, fakty, decyzje).
     Tytuł: {title}
-    Treść: {text[:5000]}
+    Treść: {text[:4500]}
     """
     
-    # KROK A: Najpierw próbujemy Groq (Llama 3.3 70B)
-    if GROQ_API_KEY:
-        groq_model = "llama-3.3-70b-versatile"
+    # KROK A: Próbujemy automatycznie wykrytych modeli z Twojego konta Groq
+    for groq_model in ACTIVE_GROQ_MODELS:
         try:
             r = requests.post(
                 "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                    "User-Agent": HEADERS["User-Agent"]
+                },
                 json={
                     "model": groq_model,
                     "messages": [{"role": "user", "content": prompt}],
@@ -169,14 +211,17 @@ def summarize_article(company, title, text):
             )
             if r.status_code == 200:
                 summary_text = r.json()["choices"][0]["message"]["content"]
+                # Niektóre modele typu reasoning (np. DeepSeek/Qwen) dodają znaczniki <think>...</think>, które odcinamy
+                if "</think>" in summary_text:
+                    summary_text = summary_text.split("</think>")[-1].strip()
                 return summary_text, f"Groq ({groq_model})"
             else:
-                print(f"Groq zwrócił status {r.status_code}: {r.text}")
+                print(f"Groq ({groq_model}) zwrócił status {r.status_code}: {r.text}")
         except Exception as e:
-            print(f"Błąd połączenia z Groq: {e}")
+            print(f"Wyjątek Groq ({groq_model}): {e}")
 
-    # KROK B: Zapasowo modele Google Gemini
-    gemini_models = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
+    # KROK B: Zapasowo próbujemy aktualnych modeli z rodziny Gemini 3.8 (w tym wersji lite i pro)
+    gemini_models = ["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-3.8-pro"]
     for model_name in gemini_models:
         for attempt in range(2):
             try:
@@ -187,12 +232,12 @@ def summarize_article(company, title, text):
                 print(f"Błąd modelu {model_name} (próba {attempt+1}): {e}")
                 if "404" in str(e):
                     break
-                time.sleep(5 * (attempt + 1))
+                time.sleep(6 * (attempt + 1))
 
     return "⚠️ Serwery AI są chwilowo przeciążone – kliknij w link poniżej, aby przeczytać całość.", "Brak (Przeciążenie API)"
 
 
-# --- 6. GŁÓWNA PĘTLA PROGRAMU ---
+# --- 7. GŁÓWNA PĘTLA PROGRAMU ---
 def main():
     companies = get_companies()
     seen_links = get_seen_links()
@@ -200,9 +245,16 @@ def main():
     print(f"Start bota. Obserwowane spółki: {companies}")
     
     for raw_company in companies:
+        if sent_count >= MAX_ARTICLES_PER_RUN:
+            print("Osiągnięto limit artykułów na jedno uruchomienie – reszta w kolejnym cyklu.")
+            break
+
         articles, valid_symbol = get_bankier_news_for_company(raw_company, seen_links)
 
         for article in articles:
+            if sent_count >= MAX_ARTICLES_PER_RUN:
+                break
+
             article_text, article_date = get_article_content_and_date(article["url"], article["title"])
             summary, used_model = summarize_article(valid_symbol, article["title"], article_text)
             
@@ -222,7 +274,7 @@ def main():
                 save_seen_link(article["url"])
                 sent_count += 1
             
-            time.sleep(3)
+            time.sleep(4)
 
     if sent_count == 0:
         spolki_str = ", ".join(companies) if companies else "brak"
