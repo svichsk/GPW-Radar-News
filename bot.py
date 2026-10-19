@@ -19,6 +19,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 }
 
+# Słownik automatycznie zamieniający potoczne nazwy na oficjalne skróty z Bankier.pl
 SYMBOL_ALIASES = {
     "CYBERFOLKS": "CYBERFLKS",
     "CYBER_FOLKS": "CYBERFLKS",
@@ -50,10 +51,9 @@ def save_seen_link(url):
         print(f"Info przy zapisie linku: {e}")
 
 def send_telegram_message(text):
-    """Wysyła wiadomość w trybie HTML (odpornym na znaki _ i *). Zwraca True, jeśli się udało."""
+    """Wysyła wiadomość w trybie HTML. Zwraca True, jeśli się udało."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     
-    # Próba 1: Wysyłka z eleganckim formatowaniem HTML
     r = requests.post(
         url,
         json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": False},
@@ -62,22 +62,17 @@ def send_telegram_message(text):
     if r.status_code == 200:
         return True
 
-    print(f"Błąd formatowania HTML Telegrama ({r.status_code}): {r.text}. Ponawiam jako zwykły tekst...")
+    print(f"Błąd formatowania HTML ({r.status_code}): {r.text}. Ponawiam jako zwykły tekst...")
     
-    # Próba 2 (Awaryjna): Jeśli cokolwiek w tekście przeszkadza Telegramowi, wysyłamy bez parse_mode
     r_fallback = requests.post(
         url,
         json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": False},
         timeout=10
     )
-    if r_fallback.status_code == 200:
-        return True
-
-    print(f"Krytyczny błąd wysyłki na Telegram: {r_fallback.text}")
-    return False
+    return r_fallback.status_code == 200
 
 
-# --- 3. PRECYZYJNE POBIERANIE NEWSÓW Z BANKIER.PL ---
+# --- 3. POBIERANIE NEWSÓW Z BANKIER.PL ---
 def get_bankier_news_for_company(raw_symbol, seen_links):
     symbol = SYMBOL_ALIASES.get(raw_symbol.upper(), raw_symbol.upper())
     profile_url = f"https://www.bankier.pl/inwestowanie/profile/quote.html?symbol={symbol}"
@@ -85,31 +80,17 @@ def get_bankier_news_for_company(raw_symbol, seen_links):
     try:
         response = requests.get(profile_url, headers=HEADERS, timeout=10)
         if response.status_code != 200:
-            return [], symbol, False
+            return [], symbol
     except Exception as e:
         print(f"Błąd połączenia z Bankierem dla {symbol}: {e}")
-        return [], symbol, False
+        return [], symbol
 
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # 1. Sprawdzamy, czy profil spółki faktycznie istnieje na Bankierze
-    if not soup.find("div", class_="profilLast") and not soup.find(id="boxProfilHeader"):
-        print(f"UWAGA: Symbol {symbol} nie istnieje na Bankier.pl!")
-        return [], symbol, False
-
-    # 2. Usuwamy z drzewa HTML paski boczne, stopkę oraz ramki z ogólnymi wiadomościami z kraju
+    # Usuwamy paski boczne, nawigację i stopkę, żeby nie łapać ogólnych newsów z portalu
     for tag in soup.find_all(["aside", "footer", "nav"]):
         tag.decompose()
 
-    for box in soup.find_all("div", class_="box"):
-        header = box.find(["h2", "h3", "div"], class_=lambda c: c and "header" in c.lower()) or box.find(["h2", "h3"])
-        if header:
-            h_text = header.get_text(" ", strip=True).lower()
-            # Jeśli nagłówek ramki to ogólne "Najnowsze wiadomości" lub "Polecane", usuwamy tę ramkę
-            if "najnowsze wiadomości" in h_text or "polecane" in h_text or "wiadomości dnia" in h_text:
-                box.decompose()
-
-    # 3. Zbieramy artykuły z oczyszczonej strony profilu spółki
     new_articles = []
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"]
@@ -125,7 +106,7 @@ def get_bankier_news_for_company(raw_symbol, seen_links):
                 break
 
     print(f"Spółka {symbol}: znaleziono {len(new_articles)} nowych artykułów.")
-    return new_articles, symbol, True
+    return new_articles, symbol
 
 
 # --- 4. POBIERANIE TREŚCI I DATY PUBLIKACJI ARTYKUŁU ---
@@ -219,20 +200,12 @@ def main():
     print(f"Start bota. Obserwowane spółki: {companies}")
     
     for raw_company in companies:
-        articles, valid_symbol, exists = get_bankier_news_for_company(raw_company, seen_links)
-        
-        if not exists:
-            send_telegram_message(
-                f"⚠️ <b>Uwaga:</b> Nie znaleziono profilu spółki <code>{html.escape(raw_company)}</code> na Bankier.pl!\n"
-                f"Usuń ją komendą /usun {html.escape(raw_company)} i sprawdź oficjalny skrót GPW (np. dla cyber_Folks to CYBERFLKS)."
-            )
-            continue
+        articles, valid_symbol = get_bankier_news_for_company(raw_company, seen_links)
 
         for article in articles:
             article_text, article_date = get_article_content_and_date(article["url"], article["title"])
             summary, used_model = summarize_article(valid_symbol, article["title"], article_text)
             
-            # html.escape() zabezpiecza znaki specjalne (<, >, &), żeby HTML w Telegramie nigdy się nie zepsuł
             safe_title = html.escape(article["title"])
             safe_summary = html.escape(summary).replace("**", "")
             safe_model = html.escape(used_model)
@@ -245,7 +218,6 @@ def main():
                 f"🔗 <a href=\"{article['url']}\">Czytaj na Bankier.pl</a>"
             )
             
-            # Zapisujemy link w bazie TYLKO wtedy, gdy Telegram potwierdzi wysłanie wiadomości!
             if send_telegram_message(msg):
                 save_seen_link(article["url"])
                 sent_count += 1
