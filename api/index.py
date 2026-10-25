@@ -119,11 +119,17 @@ def fetch_stock_data(symbol: str, range_str: str = "1y", interval: str = "1d"):
 
         candles_by_date = {}
         for i, ts in enumerate(timestamps):
-            if i < len(closes) and closes[i] is not None:
+            if i < len(closes) and closes[i] is not None and closes[i] > 0:
                 c_val = round(float(closes[i]), 2)
-                o_val = round(float(opens[i]), 2) if (i < len(opens) and opens[i] is not None) else c_val
-                h_val = round(float(highs[i]), 2) if (i < len(highs) and highs[i] is not None) else c_val
-                l_val = round(float(lows[i]), 2) if (i < len(lows) and lows[i] is not None) else c_val
+                # Zabezpieczenie: jeśli którakolwiek wartość w świecy wynosi None lub 0, bierzemy kurs zamknięcia
+                o_raw = opens[i] if (i < len(opens) and opens[i]) else c_val
+                h_raw = highs[i] if (i < len(highs) and highs[i]) else c_val
+                l_raw = lows[i] if (i < len(lows) and lows[i]) else c_val
+
+                o_val = round(float(o_raw), 2) if o_raw > 0 else c_val
+                h_val = round(float(h_raw), 2) if h_raw > 0 else c_val
+                l_val = round(float(l_raw), 2) if l_raw > 0 else c_val
+
                 date_str = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
                 candles_by_date[date_str] = {
                     "time": date_str,
@@ -136,7 +142,7 @@ def fetch_stock_data(symbol: str, range_str: str = "1y", interval: str = "1d"):
         candles = sorted(candles_by_date.values(), key=lambda x: x["time"])
 
         price = meta.get("regularMarketPrice")
-        if price is None and candles:
+        if not price and candles:
             price = candles[-1]["close"]
 
         prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
@@ -146,6 +152,21 @@ def fetch_stock_data(symbol: str, range_str: str = "1y", interval: str = "1d"):
         change = (price - prev_close) if (price is not None and prev_close) else 0.0
         change_pct = ((change / prev_close) * 100) if prev_close else 0.0
 
+        # Wyliczamy prawdziwy zakres 52 tygodni (ostatnie ~252 sesje giełdowe) prosto z historii świec
+        year_candles = candles[-252:] if candles else []
+        calc_low_52w = min((c["low"] for c in year_candles), default=0.0)
+        calc_high_52w = max((c["high"] for c in year_candles), default=0.0)
+
+        meta_low_52w = float(meta.get("fiftyTwoWeekLow") or 0)
+        meta_high_52w = float(meta.get("fiftyTwoWeekHigh") or 0)
+
+        # Jeśli Yahoo zwraca 0 w meta, bierzemy naszą wyliczoną wartość ze świec
+        low_52w = meta_low_52w if meta_low_52w > 0 else calc_low_52w
+        high_52w = max(meta_high_52w, calc_high_52w)
+
+        day_low_raw = float(meta.get("regularMarketDayLow") or 0)
+        day_high_raw = float(meta.get("regularMarketDayHigh") or 0)
+
         return {
             "symbol": symbol.upper(),
             "ticker": ticker,
@@ -153,16 +174,15 @@ def fetch_stock_data(symbol: str, range_str: str = "1y", interval: str = "1d"):
             "price": round(float(price), 2) if price is not None else 0.0,
             "change": round(float(change), 2),
             "change_pct": round(float(change_pct), 2),
-            "day_high": round(float(meta.get("regularMarketDayHigh") or (candles[-1]["high"] if candles else 0)), 2),
-            "day_low": round(float(meta.get("regularMarketDayLow") or (candles[-1]["low"] if candles else 0)), 2),
-            "high_52w": round(float(meta.get("fiftyTwoWeekHigh") or 0), 2),
-            "low_52w": round(float(meta.get("fiftyTwoWeekLow") or 0), 2),
+            "day_high": round(day_high_raw if day_high_raw > 0 else (candles[-1]["high"] if candles else 0), 2),
+            "day_low": round(day_low_raw if day_low_raw > 0 else (candles[-1]["low"] if candles else 0), 2),
+            "high_52w": round(high_52w, 2),
+            "low_52w": round(low_52w, 2),
             "candles": candles
         }
     except Exception as e:
         print(f"Błąd pobierania danych giełdowych dla {symbol}: {e}")
         return None
-
 
 # --- 3. GENERATOR INTERAKTYWNEGO WYKRESU HTML (TRADINGVIEW) ---
 def build_chart_html(symbol: str) -> HTMLResponse:
