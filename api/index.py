@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 import requests
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from supabase import create_client
 
 app = FastAPI()
@@ -15,7 +15,7 @@ POPULAR_COMPANIES = [
     "XTB", "LPP", "KRUK", "ZABKA"
 ]
 
-# Mapowanie nazw z Bankier.pl / GPW na międzynarodowe tickery giełdowe (Yahoo Finance .WA)
+# Mapowanie nazw z Bankier.pl / GPW na tickery giełdowe (Yahoo Finance .WA)
 GPW_TO_TICKER = {
     "PKNORLEN": "PKN.WA", "ORLEN": "PKN.WA", "PKN": "PKN.WA",
     "CDPROJEKT": "CDR.WA", "CDR": "CDR.WA",
@@ -75,14 +75,12 @@ def answer_callback(token: str, callback_id: str, text: str = ""):
 
 # --- 2. POBIERANIE DANYCH GIEŁDOWYCH (KURS + HISTORIA DO WYKRESU) ---
 def resolve_yahoo_ticker(symbol: str) -> str:
-    """Zamienia nazwę spółki z GPW na ticker giełdowy .WA"""
     clean = symbol.upper().strip()
     if clean in GPW_TO_TICKER:
         return GPW_TO_TICKER[clean]
     if clean.endswith(".WA"):
         return clean
 
-    # Jeśli spółki nie ma w słowniku, pytamy wyszukiwarkę Yahoo Finance o polską giełdę (.WA)
     try:
         search_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={clean}&quotesCount=5"
         r = requests.get(search_url, headers=HEADERS, timeout=6)
@@ -97,7 +95,6 @@ def resolve_yahoo_ticker(symbol: str) -> str:
     return f"{clean}.WA"
 
 def fetch_stock_data(symbol: str, range_str: str = "1y", interval: str = "1d"):
-    """Pobiera aktualny kurs oraz świece historyczne OHLC dla danej spółki."""
     ticker = resolve_yahoo_ticker(symbol)
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={range_str}&interval={interval}"
     
@@ -120,7 +117,6 @@ def fetch_stock_data(symbol: str, range_str: str = "1y", interval: str = "1d"):
         lows = quote.get("low", [])
         closes = quote.get("close", [])
 
-        # Budujemy listę świec dla TradingView (posortowaną i bez duplikatów dat)
         candles_by_date = {}
         for i, ts in enumerate(timestamps):
             if i < len(closes) and closes[i] is not None:
@@ -143,7 +139,6 @@ def fetch_stock_data(symbol: str, range_str: str = "1y", interval: str = "1d"):
         if price is None and candles:
             price = candles[-1]["close"]
 
-        # Obliczamy zmianę dzienną względem poprzedniego zamknięcia
         prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
         if len(candles) >= 2:
             prev_close = candles[-2]["close"]
@@ -160,7 +155,7 @@ def fetch_stock_data(symbol: str, range_str: str = "1y", interval: str = "1d"):
             "change_pct": round(float(change_pct), 2),
             "day_high": round(float(meta.get("regularMarketDayHigh") or (candles[-1]["high"] if candles else 0)), 2),
             "day_low": round(float(meta.get("regularMarketDayLow") or (candles[-1]["low"] if candles else 0)), 2),
-            " high_52w": round(float(meta.get("fiftyTwoWeekHigh") or 0), 2),
+            "high_52w": round(float(meta.get("fiftyTwoWeekHigh") or 0), 2),
             "low_52w": round(float(meta.get("fiftyTwoWeekLow") or 0), 2),
             "candles": candles
         }
@@ -169,11 +164,8 @@ def fetch_stock_data(symbol: str, range_str: str = "1y", interval: str = "1d"):
         return None
 
 
-# --- 3. INTERAKTYWNY WYKRES (TELEGRAM MINI APP - TRADINGVIEW) ---
-@app.get("/wykres", response_class=HTMLResponse)
-@app.get("/api/wykres", response_class=HTMLResponse)
-def render_chart_webapp(symbol: str = "PKNORLEN"):
-    """Zwraca interaktywną aplikację wykresu TradingView otwieraną wewnątrz Telegrama."""
+# --- 3. GENERATOR INTERAKTYWNEGO WYKRESU HTML (TRADINGVIEW) ---
+def build_chart_html(symbol: str) -> HTMLResponse:
     stock = fetch_stock_data(symbol, range_str="5y", interval="1d")
     if not stock or not stock["candles"]:
         return HTMLResponse(
@@ -293,6 +285,8 @@ def render_chart_webapp(symbol: str = "PKNORLEN"):
 
         const container = document.getElementById('chart-container');
         const chart = LightweightCharts.createChart(container, {{
+            width: container.clientWidth || window.innerWidth,
+            height: container.clientHeight || (window.innerHeight - 130),
             layout: {{ background: {{ type: 'solid', color: '#0f172a' }}, textColor: '#94a3b8' }},
             grid: {{ vertLines: {{ color: '#1e293b' }}, horzLines: {{ color: '#1e293b' }} }},
             crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
@@ -372,11 +366,11 @@ def send_company_quote_card(token: str, chat_id: int, symbol: str, base_url: str
         f"💵 *Aktualny kurs:* `{stock['price']:.2f} {stock['currency']}`\n"
         f"{icon} *Zmiana dzienna:* `{sign}{stock['change']:.2f} {stock['currency']} ({sign}{stock['change_pct']:.2f}%)`\n"
         f"📊 *Zakres dzienny:* `{stock['day_low']:.2f} – {stock['day_high']:.2f} {stock['currency']}`\n"
-        f"📅 *Zakres 52 tyg.:* `{stock['low_52w']:.2f} – {stock[' high_52w']:.2f} {stock['currency']}`"
+        f"📅 *Zakres 52 tyg.:* `{stock['low_52w']:.2f} – {stock['high_52w']:.2f} {stock['currency']}`"
     )
 
-    # Przycisk web_app otwiera interaktywny wykres bezpośrednio w oknie Telegrama!
-    webapp_url = f"{base_url}/wykres?symbol={stock['symbol']}"
+    # Uderzamy bezpośrednio w /api/index?symbol=..., żeby ominąć przekierowania Vercela!
+    webapp_url = f"{base_url}/api/index?symbol={stock['symbol']}"
     keyboard = {
         "inline_keyboard": [
             [{"text": f"📊 Interaktywny wykres {stock['symbol']}", "web_app": {"url": webapp_url}}],
@@ -386,14 +380,20 @@ def send_company_quote_card(token: str, chat_id: int, symbol: str, base_url: str
     send_message(token, chat_id, text, reply_markup=keyboard)
 
 
+# --- 5. OBSŁUGA GET (WYKRES LUB STATUS SERWERA) ---
 @app.get("/")
+@app.get("/wykres")
+@app.get("/api/wykres")
 @app.get("/api/index")
 @app.get("/api/webhook")
-def health_check():
-    return {"status": "Serwer dziala!"}
+def handle_get_requests(symbol: str = None):
+    # Jeśli w adresie jest ?symbol=..., od razu wyświetlamy interaktywny wykres!
+    if symbol:
+        return build_chart_html(symbol)
+    return JSONResponse({"status": "Serwer dziala!"})
 
 
-# --- 5. GŁÓWNY WEBHOOK TELEGRAMA ---
+# --- 6. GŁÓWNY WEBHOOK TELEGRAMA (POST) ---
 @app.post("/")
 @app.post("/api/index")
 @app.post("/api/webhook")
@@ -405,13 +405,11 @@ async def telegram_webhook(request: Request):
         supa_key = os.environ.get("SUPABASE_KEY", "").strip()
         my_chat_id_str = os.environ.get("TELEGRAM_CHAT_ID", "0").strip()
 
-        # Automatycznie wykrywamy domenę Twojego Vercela do otwierania Mini App
         host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
         base_url = f"https://{host}"
 
         supabase = create_client(supa_url, supa_key)
 
-        # --- A. OBSŁUGA KLIKNIĘCIA W PRZYCISK ---
         if "callback_query" in data:
             cb = data["callback_query"]
             cb_id = cb["id"]
@@ -444,7 +442,6 @@ async def telegram_webhook(request: Request):
 
             return {"status": "ok"}
 
-        # --- B. OBSŁUGA KOMEND TEKSTOWYCH ---
         message = data.get("message", {})
         chat_id = message.get("chat", {}).get("id")
         text = message.get("text", "").strip()
@@ -460,7 +457,6 @@ async def telegram_webhook(request: Request):
             if argument:
                 send_company_quote_card(token, chat_id, argument, base_url)
             else:
-                # Pobieramy Twoje spółki z bazy SQL i budujemy siatkę przycisków
                 response = supabase.table("companies").select("symbol").execute()
                 companies_list = [r["symbol"] for r in response.data]
                 if not companies_list:
